@@ -58,9 +58,12 @@ class World:
         return self.global_position[2] < 0.3
     
     def __initialize_field(self, field_name: str) -> Field:
-        if field_name in ('hl_adult', 'hl_adult_2020', 'hl_adult_2019',):
-            return HLAdultField(world=self)
-        elif field_name in ('custom_36x55', '36x55'):
-            return CustomField36x55(world=self)
-        else:
-            return FIFAField(world=self)
+        field_cls_map = {
+            'hl_adult': HLAdultField,
+            'hl_adult_2020': HLAdultField,
+            'hl_adult_2019': HLAdultField,
+            'custom_36x55': CustomField36x55,
+            '36x55': CustomField36x55,
+        }
+        field_cls = field_cls_map.get(field_name, FIFAField)
+        return field_cls(world=self)

@@ -4,6 +4,6 @@ export OMP_NUM_THREADS=1
 host=${1:-localhost}
 port=${2:-60000}
 
-for i in {1..14}; do
-  python3 run_player.py --host $host --port $port -n $i -t MujocoCodebase &
+for i in {1..7}; do
+  python3 run_player.py --host $host --port $port -n $i -t MujocoCodebase -f hl_adult &
 done
