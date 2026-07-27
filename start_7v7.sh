@@ -5,5 +5,5 @@ host=${1:-localhost}
 port=${2:-60000}
 
 for i in {1..7}; do
-  python3 run_player.py --host $host --port $port -n $i -t MujocoCodebase -f hl_adult &
+  python3 run_player.py --host $host --port $port -n $i -t MujocoCodebase -f custom_36x55 &
 done
