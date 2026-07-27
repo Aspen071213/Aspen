@@ -204,6 +204,83 @@ class DecisionMaker:
             self.agent.skills_manager.execute("Neutral")
     # ==================== 带预测的守门员结束 ====================
 
+    # ==================== 新增：防守站位（不主动抢球） ====================
+    def do_defensive_positioning(self):
+        """
+        对方发球时执行：退回到防守位置，保持距离，不主动抢球
+        避免冲撞对方持球球员和过早进入禁区被判犯规
+        """
+        # 获取当前自己的位置和对方球门位置
+        my_pos = self.agent.world.global_position[:2]
+        our_goal_pos = self.agent.world.field.get_our_goal_position()[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+        
+        # 退回到本方半场防守位置
+        # 简单策略：向本方球门方向移动，远离球
+        defensive_x = np.clip(ball_pos[0] * 0.3, -5.0, 5.0)  # 适当跟随横向移动
+        defensive_z = our_goal_pos[1] + 2.0  # 站在禁区前沿
+        
+        target_pos = np.array([defensive_x, defensive_z])
+        
+        # 面向球
+        ball_dir = ball_pos - my_pos
+        if np.linalg.norm(ball_dir) > 0.01:
+            target_angle = MathOps.vector_angle(ball_dir / np.linalg.norm(ball_dir))
+        else:
+            target_angle = 0.0
+        
+        # 移动到防守位置
+        distance = np.linalg.norm(my_pos - target_pos)
+        if distance > 0.1:
+            self.agent.skills_manager.execute(
+                "Walk",
+                target_2d=target_pos,
+                is_target_absolute=True,
+                orientation=target_angle
+            )
+        else:
+            self.agent.skills_manager.execute("Neutral")
+    # ==================== 防守站位结束 ====================
+
+    # ==================== 新增：死球等待（不提前触球） ====================
+    def do_wait_for_set_play(self):
+        """
+        我方发球时执行：站好位置等待，不提前触球或进入禁区
+        确保开球/任意球符合规则（球被踢出前不第二次触球）
+        """
+        my_pos = self.agent.world.global_position[:2]
+        ball_pos = self.agent.world.ball_pos[:2]
+        
+        # 计算我的指定位置（根据阵型或角色）
+        # 此处简化：站在球后方，与球保持距离，不进入对方禁区
+        target_pos = ball_pos - np.array([0.0, 2.0])  # 站在球后方2米
+        
+        # 限制位置：不进入对方禁区
+        field_length = self.agent.world.field.get_length()
+        half_length = field_length / 2
+        target_pos[1] = np.clip(target_pos[1], -half_length, half_length - 2.0)
+        
+        # 面向球
+        ball_dir = ball_pos - my_pos
+        if np.linalg.norm(ball_dir) > 0.01:
+            target_angle = MathOps.vector_angle(ball_dir / np.linalg.norm(ball_dir))
+        else:
+            target_angle = 0.0
+        
+        # 移动到目标位置
+        distance = np.linalg.norm(my_pos - target_pos)
+        if distance > 0.1:
+            self.agent.skills_manager.execute(
+                "Walk",
+                target_2d=target_pos,
+                is_target_absolute=True,
+                orientation=target_angle
+            )
+        else:
+            # 已经就位，等待开球
+            self.agent.skills_manager.execute("Neutral")
+    # ==================== 死球等待结束 ====================
+
     def update_current_behavior(self) -> None:
         """
         Chooses what the agent should do in the current step.
@@ -215,6 +292,7 @@ class DecisionMaker:
         if self.agent.world.playmode is PlayModeEnum.GAME_OVER:
             return
 
+        # 特殊处理：BEAM模式（发球定位）
         if self.agent.world.playmode_group in (
             PlayModeGroupEnum.ACTIVE_BEAM,
             PlayModeGroupEnum.PASSIVE_BEAM,
@@ -223,22 +301,54 @@ class DecisionMaker:
                 pos2d=self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number][:2],
                 rotation=self.BEAM_POSES[type(self.agent.world.field)][self.agent.world.number][2],
             )
+            return
 
+        # ===== 1. 如果摔倒，优先起身 =====
         if self.is_getting_up or self.agent.skills_manager.is_ready(skill_name="GetUp"):
             self.is_getting_up = not self.agent.skills_manager.execute(skill_name="GetUp")
+            self.agent.robot.commit_motor_targets_pd()
+            return
 
-        # ==================== 守门员使用简化版 ====================
-        # Goalkeeper (player 1) 执行防守
-        elif self.agent.world.number == 1:
-            # 选择其中一种：
-            self.goalkeeper_defend_simple()  # 简化版（推荐）
-            # self.goalkeeper_defend_with_prediction()  # 带预测版（可选）
+        # ===== 2. 守门员（1号）执行防守 =====
+        if self.agent.world.number == 1:
+            self.goalkeeper_defend_simple()
+            self.agent.robot.commit_motor_targets_pd()
+            return
+
+        # ===== 3. 其他球员：根据不同状态执行策略 =====
+        playmode = self.agent.world.playmode
         
-        # ==================== 其他球员逻辑 ====================
-        elif self.agent.world.playmode is PlayModeEnum.PLAY_ON:
+        # 3.1 对方开球 / 对方球门球 / 对方角球 / 对方任意球 / 对方界外球
+        if playmode in (
+            PlayModeEnum.KICKOFF_THEY,
+            PlayModeEnum.GOAL_KICK_THEY,
+            PlayModeEnum.CORNER_KICK_THEY,
+            PlayModeEnum.FREE_KICK_THEY,
+            PlayModeEnum.THROW_IN_THEY,
+        ):
+            # 执行"保持距离"策略：退回到防守位置，不主动抢球
+            self.do_defensive_positioning()
+        
+        # 3.2 我方开球 / 我方球门球 / 我方角球 / 我方任意球 / 我方界外球
+        elif playmode in (
+            PlayModeEnum.KICKOFF_WE,
+            PlayModeEnum.GOAL_KICK_WE,
+            PlayModeEnum.CORNER_KICK_WE,
+            PlayModeEnum.FREE_KICK_WE,
+            PlayModeEnum.THROW_IN_WE,
+        ):
+            # 执行"站位等待"策略：站好位置，但不提前进入禁区或触碰球
+            self.do_wait_for_set_play()
+        
+        # 3.3 常规比赛（PLAY_ON）
+        elif playmode is PlayModeEnum.PLAY_ON:
             self.carry_ball()
-        elif self.agent.world.playmode in (PlayModeEnum.BEFORE_KICK_OFF, PlayModeEnum.THEIR_GOAL, PlayModeEnum.OUR_GOAL):
+        
+        # 3.4 暂停或过渡状态（BEFORE_KICK_OFF, THEIR_GOAL, OUR_GOAL）
+        elif playmode in (PlayModeEnum.BEFORE_KICK_OFF, PlayModeEnum.THEIR_GOAL, PlayModeEnum.OUR_GOAL):
             self.agent.skills_manager.execute("Neutral")
+        
+        # 3.5 其他状态默认执行带球
         else:
             self.carry_ball()
 
